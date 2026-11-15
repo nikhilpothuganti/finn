@@ -1,0 +1,30 @@
+# Daily data pipeline: after Indian market close (16:30 IST = 11:00 UTC) refresh filings,
+# fundamentals and EOD prices, precompute LLM work for anything new, and commit the snapshot.
+# The commit triggers a Vercel redeploy, so the app always serves fresh, pre-paid-for data.
+name: refresh-data
+on:
+  schedule:
+    - cron: "0 11 * * 1-5"
+  workflow_dispatch: {}
+permissions:
+  contents: write
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run ingest
+      - run: npm run precompute
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      - run: |
+          git config user.name "finn-bot"
+          git config user.email "finn-bot@users.noreply.github.com"
+          git add data/cache
+          git diff --cached --quiet || git commit -m "data: daily refresh $(date -u +%F)"
+          git push
