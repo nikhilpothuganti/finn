@@ -84,6 +84,12 @@ flowchart LR
 - **Provider and models.** Groq free tier (OpenAI-compatible, strict JSON-schema outputs). `qwen/qwen3.8-27b` is the automatic fallback when a model is rate-limited.
 - **No autonomous agent.** This is a fixed workflow: retrieve → extract → judge. Each step is cheap, cached and inspectable; an open-ended agent loop would add cost and unpredictability for no gain on this task.
 - **Grounding.** Pull prompts receive only transcript passages and reported numbers, and are instructed to use nothing else (no news, no broker notes, no world knowledge). Every promise cites the call it came from; sources are linked on the page.
+- **Guardrails enforced in code, not trusted to the model** (each added after catching a real failure in testing):
+  - **Credibility score is arithmetic:** (delivered + ½ partly) ÷ checkable promises. With fewer than 2 checkable promises, FINN shows "not enough evidence" instead of a number.
+  - **Time rules:** each promise carries the period it refers to. A promise about an unreported period is forced to *too early*; a "promise" about a period that ended before the call (a look-back) is dropped. The model had been scoring FY27 targets as missed from a single quarter.
+  - **Unverifiable is a first-class verdict:** segment and volume targets that company-level financials can't check are never scored.
+  - **Results extraction sanity gate:** period labels must be real dates, revenue positive, PAT below revenue, and the filing at least as recent as the latest reported quarter. Otherwise FINN falls back to standardised numbers with a staleness note. This caught a parent-company (Suzuki) results filing read as Maruti's.
+- **Request path never waits on a model:** the digest reads only cached model outputs (it builds in about 10 ms); model calls happen in the daily pipeline or on an explicit "Analyse" tap.
 - **Cost controls:**
   - Content-hash caching of every LLM output (90 days), committed for the demo set, so a reviewer opening the app triggers **zero** model calls.
   - Prompt versions are part of the cache key.

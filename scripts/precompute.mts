@@ -14,11 +14,13 @@ if (!hasLLM()) {
   console.error("Set GROQ_API_KEY first (e.g. in .env.local, then: node --env-file=.env.local ...)");
   process.exit(1);
 }
-const args = process.argv.slice(2);
+// --force re-scores companies that already have an analysis (transcript extractions stay cached, so it's cheap).
+const force = process.argv.includes("--force");
+const args = process.argv.slice(2).filter((a) => !a.startsWith("--"));
 const targets = args.length ? args : [...RESEARCH_SET, "DIXON", "PIIND", "SUNPHARMA", "AAVAS", "POLYCAB", "KAYNES"];
 
 for (const s of targets) {
-  if (!args.length && (await cacheGet("analysis", s))) {
+  if (!args.length && !force && (await cacheGet("analysis", s))) {
     console.log(`= ${s} already analysed`);
     continue;
   }
@@ -33,11 +35,13 @@ for (const s of targets) {
   } catch (e) {
     console.log(`✗ ${s}: ${(e as Error).message}`);
   }
+  // Free tier is ~8K tokens/min per model: let the window reset between companies.
+  if (s !== targets.at(-1)) await new Promise((r) => setTimeout(r, Number(process.env.FINN_PAUSE_MS ?? 60_000)));
 }
 
 if (!args.length) {
   // Warm the 30-day digest: results extraction from filings + name extraction get cached + committed.
-  const d = await buildDigest({ ...DEFAULT_SETTINGS, windowHours: 720 });
+  const d = await buildDigest({ ...DEFAULT_SETTINGS, windowHours: 720 }, { live: true });
   for (const i of d.items.filter((x) => x.results)) console.log(`results ${i.symbol}: source=${i.results!.source} ${i.results!.period}`);
 }
 console.log("done", PORTFOLIO.length);

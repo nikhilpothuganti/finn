@@ -1,7 +1,9 @@
 import { z } from "zod";
 import { hasLLM, structured } from "./llm";
 import { pct, resultsCut, type ResultsCut } from "./metrics";
+import { cacheGet, cacheSet } from "./cache";
 import { pdfText } from "./sources/documents";
+import { monthKey } from "./research";
 import type { CompanySnapshot, Filing } from "./types";
 
 // Results first-cut, taken from the actual results filing (as the brief asks), not from an
@@ -53,22 +55,26 @@ export interface ResultsView extends ResultsCut {
   note?: string;
 }
 
-export async function resultsForFiling(c: CompanySnapshot, f: Filing): Promise<ResultsView | null> {
+export async function resultsForFiling(c: CompanySnapshot, f: Filing, opts: { live?: boolean } = {}): Promise<ResultsView | null> {
   const fallback = resultsCut(c);
-  if (hasLLM() && f.url.startsWith("http")) {
+  // Finished cards are cached per filing (committed by precompute) so the request path never waits on a PDF or model.
+  const hit = await cacheGet<ResultsView>("results", f.id);
+  if (hit) return hit;
+  if (opts.live && hasLLM() && f.url.startsWith("http")) {
     try {
       const text = statementSlice(await pdfText(f.url));
       if (text.length > 1000) {
         const r = await structured({
           tier: "fast",
-          task: "results-v1",
+          task: "results-v2",
           commit: true,
           schema: FilingResults,
           system:
             "Extract the quarterly P&L from an Indian listed company's results filing. Use the CONSOLIDATED statement if " +
             "present, else standalone. Columns: current quarter, immediately preceding quarter, same quarter previous year. " +
             "Copy numbers exactly as printed (no unit conversion); losses are negative. Use null if a line is absent. " +
-            "For banks, revenue = total interest earned.",
+            "For banks, revenue = total interest earned. Each column label must be the period as printed, normalised like " +
+            "'Sep 2026' (month of quarter end + year).",
           user: text,
         });
         const k = toCrore(r.unit);
@@ -86,8 +92,15 @@ export async function resultsForFiling(c: CompanySnapshot, f: Filing): Promise<R
         const m = (x: z.infer<typeof Col>) => (x.revenue && x.pat != null ? (x.pat / x.revenue) * 100 : null);
         const now = m(r.current);
         const then = m(r.year_ago);
-        if (lines[0].value != null) {
-          return {
+        // Sanity gate: real period labels, positive revenue, PAT not larger than revenue. Otherwise fall back.
+        const periodOk = [r.current.label, r.previous.label, r.year_ago.label].every((l) => /(19|20)\d{2}/.test(l));
+        // Must be at least as recent as the latest standardised quarter, or we've read the wrong document.
+        const cur = monthKey(r.current.label);
+        const std = fallback ? monthKey(fallback.period) : null;
+        const fresh = !cur || !std || cur >= std;
+        const sane = lines[0].value != null && lines[0].value > 0 && Math.abs(lines[3].value ?? 0) < lines[0].value;
+        if (periodOk && sane && fresh) {
+          const view: ResultsView = {
             source: "filing",
             basis: r.basis,
             period: r.current.label,
@@ -96,6 +109,8 @@ export async function resultsForFiling(c: CompanySnapshot, f: Filing): Promise<R
             lines,
             margin: { label: "PAT margin", now, yoyBps: now != null && then != null ? Math.round((now - then) * 100) : null },
           };
+          await cacheSet("results", f.id, view, { commit: true });
+          return view;
         }
       }
     } catch {

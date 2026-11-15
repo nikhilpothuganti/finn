@@ -140,7 +140,8 @@ const VerdictSchema = z.object({
   credibility_line: z.string().describe("one sentence a PM would remember"),
   promises: z.array(
     z.object({
-      said_in: z.string(),
+      said_in: z.string().describe("call month as 'Mon YYYY', e.g. 'Aug 2026'"),
+      target_period_end: z.string().describe("last month of the period the promise is about, as 'Mon YYYY'. Indian FY ends in March: FY27 → 'Mar 2027', Q4 FY26 → 'Mar 2026', Q2 FY27 → 'Sep 2026', H1 FY27 → 'Sep 2026'"),
       promise: z.string(),
       delivered: z.string().describe("what the numbers show, citing periods and figures from the data"),
       verdict: z.enum(["delivered", "partly", "missed", "too_early", "unverifiable"]),
@@ -153,6 +154,33 @@ const VerdictSchema = z.object({
   questions: z.array(z.string()).describe("3 sharp questions to ask management or an industry contact"),
 });
 export type Verdict = z.infer<typeof VerdictSchema> & { credibility: number | null; checked: number };
+
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+/** "Sep 2026" → 202609 (comparable month index); null if unparseable. */
+export function monthKey(label: string): number | null {
+  const m = label.toLowerCase().match(/([a-z]{3})[a-z]*\.?\s*'?(\d{2,4})/);
+  if (!m) return null;
+  const mi = MONTHS.indexOf(m[1]);
+  if (mi < 0) return null;
+  const y = Number(m[2].length === 2 ? `20${m[2]}` : m[2]);
+  return y * 100 + mi + 1;
+}
+
+/** Time rules enforced in code, not trusted to the model:
+ *  - a promise about a period that has not been reported yet → too_early
+ *  - a "promise" about a period that ended before the call → a look-back, dropped */
+function enforceTime(v: z.infer<typeof VerdictSchema>, latestReported: string) {
+  const latest = monthKey(latestReported);
+  const promises = v.promises.flatMap((p) => {
+    const said = monthKey(p.said_in);
+    const end = monthKey(p.target_period_end);
+    if (said && end && end < said - 1) return []; // period closed before it was said (allow the quarter just ended)
+    if (latest && end && end > latest && p.verdict !== "unverifiable")
+      return [{ ...p, verdict: "too_early" as const, delivered: `Not reportable until ${p.target_period_end}. ${p.delivered}` }];
+    return [p];
+  });
+  return { ...v, promises };
+}
 
 /** Score is arithmetic over verdicts, not a model's opinion: (delivered + ½·partly) / checkable. */
 function score(v: z.infer<typeof VerdictSchema>): Verdict {
@@ -220,7 +248,7 @@ export async function verdict(c: CompanySnapshot, guidance: QuarterGuidance[], n
     .join("\n\n");
   const raw = await structured({
     tier: "deep",
-    task: "verdict-v4",
+    task: "verdict-v6",
     commit: true,
     schema: VerdictSchema,
     maxTokens: 8000,
@@ -233,6 +261,10 @@ export async function verdict(c: CompanySnapshot, guidance: QuarterGuidance[], n
       "volumes, segment splits not provided), use 'unverifiable'. Indian fiscal years end in March (FY26 = Apr 2025–Mar 2026). " +
       "Choose 4-7 promises, PRIORITISING ones you can actually check against the numbers given (revenue growth, margins, " +
       "profit, capex via investing cash flow / fixed-asset growth, debt); include at most 2 unverifiable ones. " +
+      "Verdict direction: meeting OR EXCEEDING a growth/margin/profit target is 'delivered' (beating conservative guidance " +
+      "is good delivery — say so in credibility_line); 'missed' means the outcome fell short of what was promised. For a " +
+      "cautious statement (e.g. 'expect a decline'), a better-than-guided outcome is 'delivered'. For capex, spending within " +
+      "~15% of the guided amount is 'delivered'. " +
       "Judge a promise ONLY against periods that END AFTER the call in which it was made; a multi-year target whose " +
       "window has not finished is 'too_early' (you may note progress so far). A segment-level target (e.g. one business " +
       "line's margin) compared with consolidated numbers is 'unverifiable'. In 'delivered', quote the actual figure and period. credibility_line: one sentence on the pattern (e.g. 'Guides " +
@@ -240,5 +272,5 @@ export async function verdict(c: CompanySnapshot, guidance: QuarterGuidance[], n
       "Refer to quarters by the labels given (e.g. 'Sep 2026 quarter'), never as Q1/Q2/Q3. 2-4 narrative checks, 3 bull, 3 bear.",
     user: `Company: ${c.name} (${c.symbol})\n\nWHAT MANAGEMENT SAID (oldest first):\n${said}\n\nWHAT THE NUMBERS SHOW:\n${numbersBrief(c, n)}`,
   });
-  return score(raw);
+  return score(enforceTime(raw, c.quarters.periods.at(-1) ?? ""));
 }

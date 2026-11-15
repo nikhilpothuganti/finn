@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { cached, DAY, hash } from "./cache";
+import { cached, cacheGet, DAY, hash } from "./cache";
 
 // LLM layer — Groq free tier (OpenAI-compatible chat completions + strict JSON-schema outputs).
 //
@@ -64,10 +64,17 @@ interface CallOpts<S extends z.ZodType> {
   task: string;
   maxTokens?: number;
   commit?: boolean;
+  /** Serve only a cached result; never call the model (used on latency-critical request paths). */
+  cacheOnly?: boolean;
 }
 
 export async function structured<S extends z.ZodType>(opts: CallOpts<S>): Promise<z.infer<S>> {
   const key = hash(opts.task, opts.tier, opts.system, opts.user);
+  if (opts.cacheOnly) {
+    const hit = await cacheGet<z.infer<S>>(`llm-${opts.task}`, key);
+    if (hit === null) throw new LLMUnavailable();
+    return hit;
+  }
   return cached(
     `llm-${opts.task}`,
     key,
@@ -81,7 +88,7 @@ export async function structured<S extends z.ZodType>(opts: CallOpts<S>): Promis
           { role: "user", content: opts.user },
         ],
         max_completion_tokens: opts.maxTokens ?? (opts.tier === "deep" ? 6000 : 3000),
-        reasoning_effort: opts.tier === "deep" ? "medium" : "low",
+        reasoning_effort: opts.tier === "deep" ? "high" : "low",
         response_format: { type: "json_schema", json_schema: { name: opts.task.replace(/\W/g, "_"), strict: true, schema } },
       };
 

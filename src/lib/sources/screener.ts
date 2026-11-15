@@ -116,10 +116,17 @@ export async function fetchCompany(symbolRaw: string): Promise<CompanySnapshot> 
     html = await get(`${BASE}/company/${encodeURIComponent(symbol)}/`);
   }
   const $ = cheerio.load(html);
-  // Some companies have no consolidated numbers; Screener then shows an empty quarters table.
-  if ($("section#quarters table.data-table tbody tr").length === 0) {
+  // Consolidated numbers can be missing or stale (a company that stopped consolidating keeps an old
+  // consolidated table). Use standalone when it is more recent.
+  const lastQ = (doc: cheerio.CheerioAPI) =>
+    new Date(doc("section#quarters table.data-table thead th").last().attr("data-date-key") ?? "1970-01-01").getTime();
+  const staleMs = 200 * 86_400_000;
+  if ($("section#quarters table.data-table tbody tr").length === 0 || Date.now() - lastQ($) > staleMs) {
     const standalone = await get(`${BASE}/company/${encodeURIComponent(symbol)}/`).catch(() => null);
-    if (standalone) return build(cheerio.load(standalone), symbol);
+    if (standalone) {
+      const $s = cheerio.load(standalone);
+      if (lastQ($s) > lastQ($)) return build($s, symbol);
+    }
   }
   return build($, symbol);
 }

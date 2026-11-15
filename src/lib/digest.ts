@@ -79,7 +79,7 @@ const ROLE_RE = /(Chief [A-Z][a-z]+ Officer|CFO|CEO|COO|Managing Director(?: & C
 
 const NameSchema = z.object({ people: z.array(z.object({ name: z.string(), role: z.string(), joining: z.boolean() })) });
 
-async function personFromFiling(f: Filing & { person?: string }): Promise<PersonCard | undefined> {
+async function personFromFiling(f: Filing & { person?: string }, live: boolean): Promise<PersonCard | undefined> {
   const text = `${f.title}. ${f.summary ?? ""}`;
   let name = f.person ?? text.match(NAME_RE)?.[1]?.trim() ?? null;
   let role = text.match(ROLE_RE)?.[1] ?? null;
@@ -88,6 +88,8 @@ async function personFromFiling(f: Filing & { person?: string }): Promise<Person
     const res = await structured({
       tier: "fast",
       task: "mgmt-name-v1",
+      cacheOnly: !live,
+      commit: true,
       schema: NameSchema,
       system: "Extract the people named in an Indian exchange filing about a management change. joining=true if the person is being appointed. Return an empty list if no person is named.",
       user: text,
@@ -126,19 +128,21 @@ function whyFor(cat: Category, c: CompanySnapshot, r?: ResultsView, p?: PersonCa
   return null;
 }
 
-export async function buildDigest(settings: Settings) {
+/** live=false (request path): read cached model outputs only, never block on a model. */
+export async function buildDigest(settings: Settings, opts: { live?: boolean } = {}) {
+  const live = Boolean(opts.live);
   const companies = await loadPortfolio();
   const bySym = new Map(companies.map((c) => [c.symbol, c]));
   const since = Date.now() - settings.windowHours * 3_600_000;
 
-  const live = companies.flatMap((c) => c.filings).filter((f) => new Date(f.at).getTime() >= since);
+  const liveFilings = companies.flatMap((c) => c.filings).filter((f) => new Date(f.at).getTime() >= since);
   const scen = settings.scenarios ? scenarioFilings().filter((f) => new Date(f.at).getTime() >= since) : [];
-  const cats = await classifyAll(live);
+  const cats = await classifyAll(liveFilings, { live });
 
   const items: DigestItem[] = [];
   const resultsSeen = new Set<string>();
   // The filing that carries the numbers ("Financial Results ...") should represent a results event.
-  const ordered = [...scen, ...live].sort((a, b) => Number(/financial results/i.test(b.title)) - Number(/financial results/i.test(a.title)));
+  const ordered = [...scen, ...liveFilings].sort((a, b) => Number(/financial results/i.test(b.title)) - Number(/financial results/i.test(a.title)));
   for (const f of ordered) {
     const c = bySym.get(f.symbol);
     if (!c) continue;
@@ -165,8 +169,8 @@ export async function buildDigest(settings: Settings) {
       why: null,
     };
     // Enrich only what earns it: tier-1 items get the full treatment, the rest stay one line.
-    if (category === "results" && priority === 1) item.results = (await resultsForFiling(c, f)) ?? undefined;
-    if (category === "management_change" && priority === 1) item.person = await personFromFiling(f);
+    if (category === "results" && priority === 1) item.results = (await resultsForFiling(c, f, { live })) ?? undefined;
+    if (category === "management_change" && priority === 1) item.person = await personFromFiling(f, live);
     if (priority === 1 && ["M&A", "capex", "litigation", "fund_raise", "management_change", "pledging"].includes(category)) {
       item.leads = leadsForCompany(c, { limit: 3 });
     }

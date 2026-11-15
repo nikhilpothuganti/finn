@@ -9,6 +9,7 @@ import type { Category, Filing } from "./types";
 //  2. Only filings the rules can't place go to Haiku, batched, cached by filing id.
 
 const RULES: [Category, RegExp][] = [
+  ["press_release", /results (issued|declared|announced) by|financial results (of|issued by) (the )?(parent|holding|promoter|[A-Z][a-z]+ (Motor|Corporation))/i],
   ["unclassified", /appointment of (statutory |secretarial |internal |cost )?auditor|trading window|regulation 74\(5\)/i],
   ["pledging", /\bpledg|encumbr/i],
   ["insider_trading", /insider trading|regulation 7\(2\)|\bsast\b|takeover reg|acquisition of shares by promoter|disclosure.*promoter.*(buy|sell|acqui)/i],
@@ -47,7 +48,7 @@ const BatchSchema = z.object({
   items: z.array(z.object({ id: z.string(), category: z.enum(CATS) })),
 });
 
-export async function classifyAll(filings: Filing[]): Promise<Map<string, Category>> {
+export async function classifyAll(filings: Filing[], opts: { live?: boolean } = {}): Promise<Map<string, Category>> {
   const out = new Map<string, Category>();
   const unknown: Filing[] = [];
   for (const f of filings) {
@@ -60,6 +61,8 @@ export async function classifyAll(filings: Filing[]): Promise<Map<string, Catego
       const res = await structured({
         tier: "fast",
         task: "classify-v1",
+        cacheOnly: !opts.live,
+        commit: true,
         schema: BatchSchema,
         system:
           "You label Indian stock-exchange corporate announcements into exactly one category. " +
