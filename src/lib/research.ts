@@ -182,7 +182,11 @@ export function enforceTime(v: z.infer<typeof VerdictSchema>, latestReported: st
       return [{ ...p, verdict: "unverifiable" as const }];
     if (said && end && end < said - 1) return []; // period closed before it was said (allow the quarter just ended)
     if (latest && end && end > latest && p.verdict !== "unverifiable")
-      return [{ ...p, verdict: "too_early" as const, delivered: `Not reportable until ${p.target_period_end}. ${p.delivered}` }];
+      return [{
+        ...p,
+        verdict: "too_early" as const,
+        delivered: /not (yet )?(reportable|reported|ended)|too early/i.test(p.delivered) ? p.delivered.replace(/^(Not reportable until [^.]+\.\s*)+/, "") : `Not reportable until ${p.target_period_end}. ${p.delivered}`,
+      }];
     return [p];
   });
   return { ...v, promises };

@@ -89,6 +89,7 @@ flowchart LR
   - **Time rules:** each promise carries the period it refers to. A promise about an unreported period is forced to *too early*; a "promise" about a period that ended before the call (a look-back) is dropped. The model had been scoring FY27 targets as missed from a single quarter.
   - **Unverifiable is a first-class verdict:** segment and volume targets that company-level financials can't check are never scored.
   - **Results extraction sanity gate:** period labels must be real dates, revenue positive, PAT below revenue, and the filing at least as recent as the latest reported quarter. Otherwise FINN falls back to standardised numbers with a staleness note. This caught a parent-company (Suzuki) results filing read as Maruti's.
+- **Known limitation:** capex promises are checked against investing cash flow and fixed-asset growth. Investing cash flow also includes treasury investments, so a capex "miss" can be overstated. The fix is parsing the capex line from the cash-flow notes in the annual report.
 - **Request path never waits on a model:** the digest reads only cached model outputs (it builds in about 10 ms); model calls happen in the daily pipeline or on an explicit "Analyse" tap.
 - **Cost controls:**
   - Content-hash caching of every LLM output (90 days), committed for the demo set, so a reviewer opening the app triggers **zero** model calls.
