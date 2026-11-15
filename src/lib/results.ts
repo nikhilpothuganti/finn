@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { hasLLM, structured } from "./llm";
-import { pct, resultsCut, type ResultsCut } from "./metrics";
+import { isLender, pct, resultsCut, type ResultsCut } from "./metrics";
 import { cacheGet, cacheSet } from "./cache";
 import { pdfText } from "./sources/documents";
 import { monthKey } from "./research";
@@ -78,8 +78,10 @@ export async function resultsForFiling(c: CompanySnapshot, f: Filing, opts: { li
           user: text,
         });
         const k = toCrore(r.unit);
+        // For lenders interest is the cost of goods, so "EBITDA" is meaningless: show operating profit (PBT + D&A).
+        const lender = isLender(c);
         const ebitda = (x: z.infer<typeof Col>) =>
-          x.pbt == null ? null : x.pbt + (x.finance_costs ?? 0) + (x.depreciation ?? 0) - (x.other_income ?? 0);
+          x.pbt == null ? null : x.pbt + (lender ? 0 : x.finance_costs ?? 0) + (x.depreciation ?? 0) - (lender ? 0 : x.other_income ?? 0);
         const line = (key: "revenue" | "ebitda" | "pbt" | "pat", label: string) => {
           const get = (x: z.infer<typeof Col>) => {
             const v = key === "ebitda" ? ebitda(x) : x[key];
@@ -88,7 +90,7 @@ export async function resultsForFiling(c: CompanySnapshot, f: Filing, opts: { li
           const cur = get(r.current);
           return { key, label, value: cur, qoq: pct(cur, get(r.previous)), yoy: pct(cur, get(r.year_ago)) };
         };
-        const lines = [line("revenue", "Revenue"), line("ebitda", "EBITDA"), line("pbt", "PBT"), line("pat", "PAT")];
+        const lines = [line("revenue", "Revenue"), line("ebitda", lender ? "Op. profit" : "EBITDA"), line("pbt", "PBT"), line("pat", "PAT")];
         const m = (x: z.infer<typeof Col>) => (x.revenue && x.pat != null ? (x.pat / x.revenue) * 100 : null);
         const now = m(r.current);
         const then = m(r.year_ago);

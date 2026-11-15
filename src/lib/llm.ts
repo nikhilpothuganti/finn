@@ -97,7 +97,14 @@ export async function structured<S extends z.ZodType>(opts: CallOpts<S>): Promis
       for (let round = 0; round < 3; round++) {
         let waitMs = 0;
         for (const model of MODELS[opts.tier]) {
-          const res = await callGroq(model, body);
+          let res: Response;
+          try {
+            res = await callGroq(model, body);
+          } catch (e) {
+            lastErr = `${model} network: ${(e as Error).message}`; // transient: try next model / next round
+            waitMs = Math.max(waitMs, 3000);
+            continue;
+          }
           if (res.status === 429) {
             waitMs = Math.max(waitMs, Number(res.headers.get("retry-after") ?? 5) * 1000);
             lastErr = `${model} rate-limited`;

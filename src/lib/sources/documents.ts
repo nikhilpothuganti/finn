@@ -11,7 +11,12 @@ const UA =
 
 export async function pdfText(url: string): Promise<string> {
   return cached("pdftext", Buffer.from(url).toString("base64url").slice(-80), 365 * DAY, async () => {
-    const res = await fetch(url, { headers: { "User-Agent": UA } });
+    let res: Response | null = null;
+    for (let i = 0; i < 3 && !res?.ok; i++) {
+      res = await fetch(url, { headers: { "User-Agent": UA } }).catch(() => null);
+      if (!res?.ok) await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+    }
+    if (!res) throw new Error("document fetch failed");
     if (!res.ok) throw new Error(`document ${res.status}`);
     const buf = new Uint8Array(await res.arrayBuffer());
     const pdf = await getDocumentProxy(buf);

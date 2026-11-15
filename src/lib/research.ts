@@ -169,11 +169,17 @@ export function monthKey(label: string): number | null {
 /** Time rules enforced in code, not trusted to the model:
  *  - a promise about a period that has not been reported yet → too_early
  *  - a "promise" about a period that ended before the call → a look-back, dropped */
-function enforceTime(v: z.infer<typeof VerdictSchema>, latestReported: string) {
+export function enforceTime(v: z.infer<typeof VerdictSchema>, latestReported: string) {
   const latest = monthKey(latestReported);
   const promises = v.promises.flatMap((p) => {
     const said = monthKey(p.said_in);
-    const end = monthKey(p.target_period_end);
+    let end = monthKey(p.target_period_end);
+    // A full-year target ("FY27", no quarter/half named) can't end before that fiscal year's March.
+    const fy = p.promise.match(/\bFY\s?'?(\d{2})\b/i);
+    if (fy && !/\b(Q[1-4]|H[12])\b/.test(p.promise)) end = Math.max(end ?? 0, (2000 + Number(fy[1])) * 100 + 3);
+    // Judged through a proxy metric → not actually verified.
+    if (/\bproxy\b|can only (be )?test|used as (a )?proxy|cannot (be )?(directly )?(verified|assessed)/i.test(`${p.promise} ${p.delivered}`) && p.verdict !== "too_early")
+      return [{ ...p, verdict: "unverifiable" as const }];
     if (said && end && end < said - 1) return []; // period closed before it was said (allow the quarter just ended)
     if (latest && end && end > latest && p.verdict !== "unverifiable")
       return [{ ...p, verdict: "too_early" as const, delivered: `Not reportable until ${p.target_period_end}. ${p.delivered}` }];
@@ -183,7 +189,7 @@ function enforceTime(v: z.infer<typeof VerdictSchema>, latestReported: string) {
 }
 
 /** Score is arithmetic over verdicts, not a model's opinion: (delivered + ½·partly) / checkable. */
-function score(v: z.infer<typeof VerdictSchema>): Verdict {
+export function score(v: z.infer<typeof VerdictSchema>): Verdict {
   const checkable = v.promises.filter((p) => ["delivered", "partly", "missed"].includes(p.verdict));
   const pts = checkable.reduce((s, p) => s + (p.verdict === "delivered" ? 1 : p.verdict === "partly" ? 0.5 : 0), 0);
   return { ...v, checked: checkable.length, credibility: checkable.length >= 2 ? Math.round((pts / checkable.length) * 100) / 10 : null };
