@@ -274,11 +274,12 @@ const V_ICON = {
   partly: { Icon: MinusCircle, cls: "text-watch", label: "Partly" },
   missed: { Icon: CircleSlash, cls: "text-bad", label: "Missed" },
   too_early: { Icon: CircleDashed, cls: "text-ink-3", label: "Too early" },
+  unverifiable: { Icon: CircleDashed, cls: "text-ink-3", label: "Can't verify" },
 } as const;
 
 function VerdictView({ a, leads, name }: { a: Analysis; leads: Lead[]; name: string }) {
   const v = a.verdict;
-  const score = Math.max(0, Math.min(10, v.credibility));
+  const score = v.credibility == null ? null : Math.max(0, Math.min(10, v.credibility));
   const tally = v.promises.reduce<Record<string, number>>((m, p) => ({ ...m, [p.verdict]: (m[p.verdict] ?? 0) + 1 }), {});
   return (
     <div className="space-y-3">
@@ -287,15 +288,17 @@ function VerdictView({ a, leads, name }: { a: Analysis; leads: Lead[]; name: str
           <div className="relative h-16 w-16 shrink-0">
             <svg viewBox="0 0 36 36" className="h-16 w-16 -rotate-90">
               <circle cx="18" cy="18" r="15.5" fill="none" stroke="var(--line)" strokeWidth="3" />
-              <circle cx="18" cy="18" r="15.5" fill="none" stroke={score >= 7 ? "var(--good)" : score >= 4 ? "var(--watch)" : "var(--bad)"} strokeWidth="3" strokeDasharray={`${(score / 10) * 97.4} 97.4`} strokeLinecap="round" />
+              <circle cx="18" cy="18" r="15.5" fill="none" stroke={score == null ? "var(--line)" : score >= 7 ? "var(--good)" : score >= 4 ? "var(--watch)" : "var(--bad)"} strokeWidth="3" strokeDasharray={`${((score ?? 0) / 10) * 97.4} 97.4`} strokeLinecap="round" />
             </svg>
-            <span className="num absolute inset-0 flex items-center justify-center text-[18px] font-semibold">{score.toFixed(0)}</span>
+            <span className="num absolute inset-0 flex items-center justify-center text-[18px] font-semibold">{score == null ? "–" : score.toFixed(score % 1 ? 1 : 0)}</span>
           </div>
           <div>
-            <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-3">Management credibility</p>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-3">
+              Management credibility {score == null ? "· not enough checkable promises yet" : `· ${v.checked} promises checked`}
+            </p>
             <p className="mt-0.5 font-serif text-[17px] leading-snug">{v.credibility_line}</p>
             <p className="mt-1 flex gap-2 text-[11.5px] text-ink-3">
-              {(["delivered", "partly", "missed", "too_early"] as const).map((k) => (tally[k] ? <span key={k}>{tally[k]} {V_ICON[k].label.toLowerCase()}</span> : null))}
+              {(["delivered", "partly", "missed", "too_early", "unverifiable"] as const).map((k) => (tally[k] ? <span key={k}>{tally[k]} {V_ICON[k].label.toLowerCase()}</span> : null))}
             </p>
           </div>
         </div>

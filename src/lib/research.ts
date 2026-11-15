@@ -137,14 +137,13 @@ const GuidanceSchema = z.object({
 export type QuarterGuidance = z.infer<typeof GuidanceSchema> & { period: string; url: string };
 
 const VerdictSchema = z.object({
-  credibility: z.number().describe("0-10: how reliably management delivered what it guided"),
   credibility_line: z.string().describe("one sentence a PM would remember"),
   promises: z.array(
     z.object({
       said_in: z.string(),
       promise: z.string(),
       delivered: z.string().describe("what the numbers show, citing periods and figures from the data"),
-      verdict: z.enum(["delivered", "partly", "missed", "too_early"]),
+      verdict: z.enum(["delivered", "partly", "missed", "too_early", "unverifiable"]),
     }),
   ),
   narrative_vs_numbers: z.array(z.object({ claim: z.string(), reality: z.string(), agrees: z.boolean() })),
@@ -153,27 +152,37 @@ const VerdictSchema = z.object({
   bear: z.array(z.string()),
   questions: z.array(z.string()).describe("3 sharp questions to ask management or an industry contact"),
 });
-export type Verdict = z.infer<typeof VerdictSchema>;
+export type Verdict = z.infer<typeof VerdictSchema> & { credibility: number | null; checked: number };
+
+/** Score is arithmetic over verdicts, not a model's opinion: (delivered + ½·partly) / checkable. */
+function score(v: z.infer<typeof VerdictSchema>): Verdict {
+  const checkable = v.promises.filter((p) => ["delivered", "partly", "missed"].includes(p.verdict));
+  const pts = checkable.reduce((s, p) => s + (p.verdict === "delivered" ? 1 : p.verdict === "partly" ? 0.5 : 0), 0);
+  return { ...v, checked: checkable.length, credibility: checkable.length >= 2 ? Math.round((pts / checkable.length) * 100) / 10 : null };
+}
 
 export async function quarterGuidance(c: CompanySnapshot, max = 4, onProgress?: (msg: string) => void) {
   const seen = new Set<string>();
-  const calls = c.concalls.filter((x) => x.transcriptUrl && !seen.has(x.period) && seen.add(x.period)).slice(0, max);
+  const calls = c.concalls.filter((x) => x.transcriptUrl && !seen.has(x.period) && seen.add(x.period)).slice(0, max + 2);
   const out: QuarterGuidance[] = [];
   for (const cc of calls) {
+    if (out.length >= max) break;
     onProgress?.(`Reading ${cc.period} concall transcript`);
     try {
       const passages = guidancePassages(await pdfText(cc.transcriptUrl!));
       if (passages.length < 200) continue;
       const g = await structured({
         tier: "fast",
-        task: "guidance-v1",
+        task: "guidance-v2",
         commit: true,
         schema: GuidanceSchema,
         system:
           "You extract forward-looking guidance from excerpts of an Indian listed company's earnings-call transcript. " +
           "Use ONLY the excerpts provided; never add outside knowledge. Capture explicit commitments on growth, margins, capex, " +
           "orders, segments or balance sheet — with numbers wherever stated. Skip generic optimism with no checkable content. " +
-          "Max 8 statements, most material first.",
+          "Prioritise company-level revenue growth, EBITDA/PAT margin and capex commitments (these can be verified against " +
+          "reported financials), then segment/volume targets. Also capture any look-back where management states how a prior " +
+          "target turned out. Max 8 statements, most material first.",
         user: `Company: ${c.name}\nCall: ${cc.period}\n\nExcerpts:\n${passages}`,
       });
       out.push({ ...g, period: cc.period, url: cc.transcriptUrl! });
@@ -191,7 +200,16 @@ function numbersBrief(c: CompanySnapshot, n: ReturnType<typeof numbers>) {
   const a = n.trajectory.rev
     .map((r, i) => `${r.p}: revenue ${r.v ?? "—"} cr, PAT ${n.trajectory.pat[i]?.v ?? "—"} cr, EBITDA margin ${n.trajectory.margins[i]?.ebitda?.toFixed(1) ?? "—"}%`)
     .join("\n");
-  const cash = n.cash.cfo.map((x, i) => `${x.p}: CFO ${x.v ?? "—"} cr, FCF ${n.cash.fcf[i]?.v ?? "—"} cr`).join("\n");
+  const inv = row(c.cashflow, "Cash from Investing Activity");
+  const fa = row(c.balance, "Fixed Assets");
+  const cwip = row(c.balance, "CWIP");
+  const cash = n.cash.cfo
+    .map((x, i) => {
+      const j = c.cashflow.periods.indexOf(x.p);
+      const k = c.balance.periods.indexOf(x.p);
+      return `${x.p}: CFO ${x.v ?? "—"} cr, FCF ${n.cash.fcf[i]?.v ?? "—"} cr, investing cash ${inv[j] ?? "—"} cr, fixed assets+CWIP ${k >= 0 ? (fa[k] ?? 0) + (cwip[k] ?? 0) : "—"} cr`;
+    })
+    .join("\n");
   return `QUARTERLY (reported, ₹ cr):\n${q}\n\nANNUAL:\n${a}\n\nCASH FLOW:\n${cash}\n\nDEBT/EQUITY latest: ${last(n.balance)?.de?.toFixed(2) ?? "—"}`;
 }
 
@@ -200,9 +218,9 @@ export async function verdict(c: CompanySnapshot, guidance: QuarterGuidance[], n
     .reverse()
     .map((g) => `## ${g.period} call (tone: ${g.tone})\n${g.statements.map((s) => `- [${s.topic}, ${s.horizon}] ${s.target} — "${s.quote}"`).join("\n")}\nAnalysts pressed on: ${g.analyst_pushback.join("; ") || "—"}`)
     .join("\n\n");
-  return structured({
+  const raw = await structured({
     tier: "deep",
-    task: "verdict-v1",
+    task: "verdict-v4",
     commit: true,
     schema: VerdictSchema,
     maxTokens: 8000,
@@ -211,7 +229,16 @@ export async function verdict(c: CompanySnapshot, guidance: QuarterGuidance[], n
       "with what the reported numbers later showed. Rules: use ONLY the guidance and numbers provided — no outside knowledge, " +
       "news or assumptions about the company. Cite periods and figures. Note: a call held in month M discusses the quarter that " +
       "ended just before it (e.g. an 'Oct 2026' call discusses the Sep 2026 quarter). If the delivery period has not been " +
-      "reported yet, use 'too_early'. Be concise: every string under 30 words. 3-6 promises, 2-4 narrative checks, 3 bull, 3 bear.",
+      "reported yet, use 'too_early'. If the promise cannot be checked from company-level financials at all (e.g. unit " +
+      "volumes, segment splits not provided), use 'unverifiable'. Indian fiscal years end in March (FY26 = Apr 2025–Mar 2026). " +
+      "Choose 4-7 promises, PRIORITISING ones you can actually check against the numbers given (revenue growth, margins, " +
+      "profit, capex via investing cash flow / fixed-asset growth, debt); include at most 2 unverifiable ones. " +
+      "Judge a promise ONLY against periods that END AFTER the call in which it was made; a multi-year target whose " +
+      "window has not finished is 'too_early' (you may note progress so far). A segment-level target (e.g. one business " +
+      "line's margin) compared with consolidated numbers is 'unverifiable'. In 'delivered', quote the actual figure and period. credibility_line: one sentence on the pattern (e.g. 'Guides " +
+      "conservatively and beats on revenue, but margin promises keep slipping'). Every string under 30 words. " +
+      "Refer to quarters by the labels given (e.g. 'Sep 2026 quarter'), never as Q1/Q2/Q3. 2-4 narrative checks, 3 bull, 3 bear.",
     user: `Company: ${c.name} (${c.symbol})\n\nWHAT MANAGEMENT SAID (oldest first):\n${said}\n\nWHAT THE NUMBERS SHOW:\n${numbersBrief(c, n)}`,
   });
+  return score(raw);
 }
