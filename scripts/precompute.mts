@@ -11,8 +11,9 @@ import { numbers, quarterGuidance, verdict } from "../src/lib/research";
 import { getCompany } from "../src/lib/sources/screener";
 
 if (!hasLLM()) {
-  console.error("Set GROQ_API_KEY first (e.g. in .env.local, then: node --env-file=.env.local ...)");
-  process.exit(1);
+  // Don't fail the pipeline: fresh filings/prices from ingest should still be committed.
+  console.warn("GROQ_API_KEY not set — skipping LLM precompute (app falls back to cached analyses).");
+  process.exit(0);
 }
 // --force re-scores companies that already have an analysis (transcript extractions stay cached, so it's cheap).
 const force = process.argv.includes("--force");
